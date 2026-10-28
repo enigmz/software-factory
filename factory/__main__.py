@@ -6,6 +6,7 @@ from pathlib import Path
 from .contracts import Spec, Build, Review, Verification, Risk
 from .engine import Factory, GateError
 from .worker import Config, Worker
+from .browser import BrowserSession
 
 
 def main():
@@ -29,10 +30,25 @@ def main():
     approve.add_argument('--actor', required=True)
     schema = commands.add_parser('schema')
     schema.add_argument('name', choices=['Spec', 'Build', 'Review', 'Verification', 'Risk'])
+    browser = commands.add_parser('browser-check')
+    browser.add_argument('--config', required=True)
+    browser.add_argument('--commit', required=True)
     args = parser.parse_args()
     try:
         if args.command == 'schema':
             result = {c.__name__: c for c in (Spec, Build, Review, Verification, Risk)}[args.name].model_json_schema()
+        elif args.command == 'browser-check':
+            config = Config.model_validate_json(Path(args.config).read_text(encoding='utf-8'))
+            if config.browser is None:
+                raise GateError('Configure browser.base_url first')
+            with BrowserSession(config.browser, args.commit, Path(config.artifacts) / 'browser') as session:
+                session.call('screenshot', {})
+                session.call('viewport', {'device': 'mobile'})
+                session.call('screenshot', {})
+                result = {'transport_ok': session.complete(), 'artifacts': str(session.directory),
+                          'note': 'Browser smoke check only; not a UI approval'}
+            if not result['transport_ok']:
+                raise GateError('Browser smoke check failed; inspect ' + result['artifacts'])
         elif args.command in ('step', 'run'):
             config = Config.model_validate_json(Path(args.config).read_text(encoding='utf-8'))
             worker = Worker(config)

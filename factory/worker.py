@@ -11,6 +11,7 @@ from .engine import Factory, GateError, ROLES
 from .openai_agents import OpenAIAgent
 from .runtime import RepositoryTools
 from .workspace import Workspace
+from .browser import BrowserConfig, BrowserHarness
 
 
 class BuildResult(Contract):
@@ -26,6 +27,7 @@ class Config(Contract):
     checks: dict[str, list[str]]
     auto_merge: bool = False
     auto_paths: list[str] = Field(default_factory=list)
+    browser: BrowserConfig | None = None
 
 
 def require_browser(browser):
@@ -57,6 +59,8 @@ class Worker:
         self.workspace = Workspace(config.repo, config.worktrees)
         self.agent_factory = agent_factory
         self.browser_factory = browser_factory
+        if self.browser_factory is None and config.browser is not None:
+            self.browser_factory = BrowserHarness(config.browser, Path(config.artifacts) / 'browser', lambda: self._agent('ui'))
 
     def brain(self, revision):
         files = self.workspace.git('ls-tree', '-r', '--name-only', revision, '--', 'brain').splitlines()
@@ -131,6 +135,7 @@ class Worker:
             checks = {name: tools.run_check(name) for name in ('tests', 'lint', 'acceptance')}
             journal = json.loads(journal_path.read_text(encoding='utf-8'))
             task_evidence = {}
+            visual_checks = {}
             for unit in data['spec']['tasks']:
                 records = [r for r in journal if r['task_id'] == unit['id']]
                 reds = [i for i, r in enumerate(records) if r['phase'] == 'red' and r['assertion_failure']]
@@ -141,13 +146,15 @@ class Worker:
                 # Visual proof must come from an independent preview harness.
                 if unit['validation'] == 'visual':
                     browser = require_browser(self.browser_factory)
-                    evidence = browser.verify_task(snapshot['commit'], unit)
+                    visual = browser.verify_task(snapshot['commit'], {**unit, 'brain': brain})
+                    evidence = visual.evidence
+                    visual_checks['visual:' + unit['id']] = visual.passed
                 task_evidence[unit['id']] = evidence
             # Check commands themselves must not mutate the reviewed revision.
             if self.workspace.snapshot(path, base) != snapshot:
                 raise GateError('Verification changed the workspace')
             return f.set_verification(task_id, Verification(commit=snapshot['commit'],
-                checks={k: v['exit_code'] == 0 for k, v in checks.items()},
+                checks={**{k: v['exit_code'] == 0 for k, v in checks.items()}, **visual_checks},
                 evidence=[r['id'] for r in checks.values()], task_evidence=task_evidence))
 
         if state == 'REVIEW_PENDING':

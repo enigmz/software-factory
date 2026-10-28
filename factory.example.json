@@ -5,7 +5,7 @@
   "artifacts": "data/factory/artifacts",
   "models": {
     "default": "YOUR_OPENAI_MODEL",
-    "ui": "YOUR_COMPUTER_USE_MODEL"
+    "ui": "YOUR_VISION_AND_FUNCTION_CALLING_MODEL"
   },
   "checks": {
     "tests": ["python", "-m", "pytest", "-q"],
@@ -13,5 +13,12 @@
     "acceptance": ["python", "-m", "pytest", "tests/acceptance", "-q"]
   },
   "auto_merge": false,
-  "auto_paths": []
+  "auto_paths": [],
+  "browser": {
+    "base_url": "http://127.0.0.1:8765",
+    "headless": true,
+    "max_actions": 40,
+    "timeout_ms": 10000,
+    "max_seconds": 300
+  }
 }

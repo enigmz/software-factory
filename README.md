@@ -6,8 +6,9 @@ Git, Brain versionado y cuatro revisiones independientes.
 **Estado: primera versión del núcleo, no una plataforma de producción completa.**
 El motor, los worktrees, las herramientas del Builder, el adaptador de OpenAI y
 las reglas de aprobación están implementados. Las llamadas reales a OpenAI aún
-no se han validado con credenciales. El navegador de UI, los webhooks y la
-publicación automática de PR/despliegues requieren adaptadores adicionales.
+no se han validado con credenciales. El harness de UI está implementado con
+Chromium y probado contra una preview local real. Los webhooks y la publicación
+automática de PR/despliegues requieren adaptadores adicionales.
 El sistema bloquea las etapas que no tienen esas capacidades; no simula un OK.
 
 ## Instalación
@@ -110,16 +111,80 @@ el revisor de consistencia y la suite independiente deben detectar tests débile
 o eliminados. Las pruebas de aceptación deben estar controladas fuera del alcance
 del Builder cuando se utilice con código no confiable.
 
-Los cambios visuales requieren un harness de preview independiente. Actualmente
-se inyecta mediante `Worker(..., browser_factory=...)` con estos métodos:
+Los cambios visuales usan `BrowserHarness`: `verify_task` devuelve un
+`VisualResult` con veredicto, evidencia y resumen; `review` devuelve un `Review`.
+Un fallo visual vuelve al Builder mediante las mismas reglas de reintento.
 
-- `verify_task(commit, task) -> list[str]`: artefactos reales con prefijo `visual:`.
-- `review(agent, context, path) -> Review`: sesión de navegador sobre la preview
-  del commit exacto, capturas y acciones observadas antes de devolver el informe.
+## Harness de navegador
 
-**Ese harness de computer use todavía no está implementado.** La CLI bloqueará
-la validación visual o la revisión UI mientras falte. No basta seleccionar un
-modelo con visión para poder operar un navegador.
+Instala la dependencia opcional y el navegador:
+
+```powershell
+python -m pip install -r requirements-browser.txt
+python -m playwright install chromium
+```
+
+En `factory.local.json`, configura `browser.base_url` como un origen de loopback
+con puerto explícito, por ejemplo `http://127.0.0.1:8765`. El resto de opciones
+está en `factory.example.json`. La CLI conecta automáticamente el harness al
+worker cuando existe esa configuración. Sin ella, la revisión UI sigue bloqueada.
+
+La preview debe responder en `/.factory/revision` con **exactamente**
+`{"commit":"SHA_COMPLETO"}`. El servicio que publica ese identificador es una
+frontera de confianza: debe servir realmente esa revisión, con datos sintéticos,
+y nunca falsificar el SHA para saltarse el control. Se comprueba antes y después
+de las acciones y antes de aceptar la revisión.
+
+Para sitios estáticos con archivos versionados, hay un servidor incluido:
+
+```powershell
+python -m factory.preview --repo C:/repos/app --commit SHA_COMPLETO --directory public --port 8765
+```
+
+Este servidor lee los archivos directamente del objeto Git, no del checkout.
+Los cambios locales posteriores no alteran lo que se muestra. No sirve archivos
+ocultos, enlaces simbólicos ni rutas fuera del directorio público. Para una app
+dinámica necesitas un servicio de preview aislado con el mismo contrato de revisión.
+El orquestador no inicia ni reconstruye automáticamente esa app.
+
+Puedes verificar el navegador sin llamar a OpenAI:
+
+```powershell
+python -m factory browser-check --config factory.local.json --commit SHA_COMPLETO
+```
+
+Este smoke test captura escritorio y móvil y devuelve la carpeta de evidencias.
+**No aprueba el diseño ni sus criterios de aceptación.**
+
+Para una revisión de agente, `models.ui` debe admitir imágenes, function calling
+y salidas estructuradas en Responses API. El harness proporciona herramientas
+para screenshot, clic por coordenadas, texto, teclado, scroll, viewport y navegación
+en el mismo origen. Es computer use mediante herramientas propias; no usa la
+herramienta nativa `computer` de OpenAI ni permite ejecutar código arbitrario.
+
+Cada revisión crea un contexto de Chromium nuevo, sin perfil ni cookies del usuario.
+Bloquea solicitudes a otros orígenes, WebSockets, service workers, ventanas nuevas
+y descargas. Los límites de acciones y tiempo son configurables. Un intento
+bloqueado invalida la sesión; el modelo no puede convertirlo después en PASS.
+
+Un PASS requiere capturas observadas en escritorio y móvil, revisión vigente y
+sesión sin bloqueos. Esto verifica la existencia de observaciones, **no garantiza
+la corrección del juicio visual del modelo**. No se deben dar por comprobadas
+accesibilidad o contraste si el agente no tiene evidencia suficiente.
+
+Capturas PNG, hashes, `manifest.json`, `review.json` y una traza Playwright se
+guardan en `artifacts/browser/COMMIT/SESSION` (bajo la ruta de artifacts configurada).
+El harness sustituye referencias de evidencia inventadas por el modelo por las
+referencias de sus archivos reales. La traza se puede abrir con:
+
+```powershell
+python -m playwright show-trace RUTA/trace.zip
+```
+
+Estas trazas y capturas pueden contener datos visibles de la preview. Usa datos
+sintéticos y no las publiques ni las envíes a modelos con sesiones personales.
+Los contextos de navegador y las restricciones de herramientas no sustituyen
+un contenedor/VM ni un firewall de salida para código hostil o producción.
 
 ## Límites de seguridad
 
@@ -141,12 +206,23 @@ que un CSS carezca de efectos globales: se requiere revisión y evidencia visual
 
 ## Pruebas
 
-22 pruebas cubren deduplicación concurrente, persistencia, transiciones inválidas,
+Validación local del harness: **33 pruebas pasan** con Python 3.13 en Windows,
+incluidas pruebas con Chromium real. La integración con OpenAI usa respuestas
+simuladas; todavía queda pendiente validarla con una clave API real.
+
+Las pruebas cubren deduplicación concurrente, persistencia, transiciones inválidas,
 revisiones obsoletas, cuatro revisores distintos, límites de corrección, riesgo,
 aprobación humana ligada al commit, recibos de despliegue y reversión, restricciones
 de herramientas y errores de OpenAI. La integración usa Git y comandos Python
-reales con un ciclo red/green; agentes y navegador se sustituyen por dobles de
-prueba. No requiere API key ni hace llamadas externas.
+reales con un ciclo red/green. Las pruebas del harness operan Chromium real contra
+un servidor HTTP local; solo se simula la decisión del agente y las respuestas de
+OpenAI. Ninguna prueba requiere API key ni llama a OpenAI.
+
+`python -m pytest -q` ejecuta la suite sin navegador. Para ejecutar las pruebas
+de Chromium usa `python -m pytest -q -m browser`; para todo, usa
+`python -m pytest -q -o addopts=`. Las pruebas de loopback necesitan permiso
+para abrir y conectar sockets locales. En Linux, instala además las bibliotecas
+del sistema con `python -m playwright install --with-deps chromium`.
 
 La configuración de CI está en `ci/github-actions.yml` como plantilla inactiva:
 la sesión de publicación no tiene el permiso OAuth `workflow`. Para activarla,
@@ -156,7 +232,7 @@ ha ejecutado en GitHub Actions. La suite local se ha probado con Python 3.13.
 
 ## Próximas integraciones
 
-- Harness aislado de computer use para UI y recorridos UX.
+- Ejecución de previews dinámicas y recorridos UX con navegador.
 - Identidad y autorización remotas; aislamiento real de workers y del almacén de evidencias.
 - GitHub/GitLab: PR, protección de ramas, checks verificados y merge con SHA esperado.
 - Sentry: autenticación de webhooks, agrupación por incidencia y observación posdespliegue.
