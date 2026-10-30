@@ -1,4 +1,5 @@
 import re
+import hashlib
 import subprocess
 from pathlib import Path
 
@@ -46,3 +47,18 @@ class Workspace:
         if any(p == 'brain' or p.startswith('brain/') for p in files):
             raise GateError('Builder changed Brain; separate architecture approval required')
         return {'commit': commit, 'changed_files': files}
+
+    def fingerprint(self, path):
+        """Content identity survives git commit but detects edits after checkpoint."""
+        root = Path(path).resolve()
+        names = self.git('ls-files', '--cached', '--others', '--exclude-standard', '-z', cwd=path).split('\0')
+        digest = hashlib.sha256()
+        for name in sorted(set(filter(None, names))):
+            target = root / name
+            if not target.resolve().is_relative_to(root) or target.is_symlink():
+                raise GateError('Unsafe checkpoint path')
+            if not target.exists():
+                continue
+            digest.update(name.encode() + b'\0')
+            digest.update(hashlib.sha256(target.read_bytes()).digest() if target.is_file() else b'deleted')
+        return digest.hexdigest()

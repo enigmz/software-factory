@@ -244,7 +244,16 @@ el worker, construye la imagen con
 `docker build -f docker/Dockerfile -t software-factory-worker:local .`.
 Consulta [preparación, límites y pruebas de aislamiento](docs/isolation.md).
 
-## Validación
+## Costes y recuperación
+
+El worker reserva presupuesto antes de generar y guarda el consumo por tarea,
+rol y modelo. Los límites iniciales son 5 USD estimados, 500.000 tokens y 100
+llamadas por tarea. Configura `budget.prices` con tarifas revisadas: sin ellas
+se bloquea. `usage` permite inspeccionar consumos y `recover` habilita una
+reanudación explícita sin borrar worktrees, checks ni consumos anteriores.
+Consulta [configuración y garantías de recuperación](docs/operations.md).
+
+## Pruebas
 
 La suite se valida con Python 3.13 en Windows, incluidas pruebas con Chromium real
 y ciclo de vida de previews: revisión exacta, cierre normal, timeout, fallos del
@@ -278,7 +287,7 @@ ha ejecutado en GitHub Actions. La suite local se ha probado con Python 3.13.
 - GitHub/GitLab: PR, protección de ramas, checks verificados y merge con SHA esperado.
 - Sentry: autenticación de webhooks, agrupación por incidencia y observación posdespliegue.
 - Proveedor de despliegue, ventanas de observación y reversión idempotente.
-- Recuperación de trabajos interrumpidos, presupuesto persistente y métricas de coste.
+- Recuperación dentro de conversaciones del agente y conciliación con la facturación del proveedor.
 
 ## Referencias de OpenAI
 

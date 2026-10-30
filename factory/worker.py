@@ -16,6 +16,7 @@ from .preview import PreviewConfig
 from .managed_browser import ManagedBrowserHarness
 from .isolation import IsolationConfig, DockerExecutor
 from .isolated_browser import DockerBrowserHarness
+from .operations import Budget, Operations
 
 
 class BuildResult(Contract):
@@ -34,6 +35,7 @@ class Config(Contract):
     browser: BrowserConfig | None = None
     preview: PreviewConfig | None = None
     isolation: IsolationConfig = Field(default_factory=IsolationConfig)
+    budget: Budget = Field(default_factory=Budget)
 
     @model_validator(mode='after')
     def preview_requires_browser(self):
@@ -54,16 +56,32 @@ def require_browser(browser):
 def worker_lock(database):
     path = Path(str(database) + '.worker.lock')
     path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = open(path, 'a+b')
+    locked = False
     try:
-        descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-    except FileExistsError as exc:
-        raise GateError('Worker already active, or stale lock requires operator recovery') from exc
-    try:
-        os.write(descriptor, str(os.getpid()).encode())
-        os.close(descriptor)
+        try:
+            if os.fstat(descriptor.fileno()).st_size == 0:
+                descriptor.write(b'0')
+                descriptor.flush()
+            descriptor.seek(0)
+            if os.name == 'nt':
+                import msvcrt
+                msvcrt.locking(descriptor.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(descriptor.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            locked = True
+        except OSError as exc:
+            raise GateError('Worker already active') from exc
         yield
     finally:
-        path.unlink()
+        if locked:
+            descriptor.seek(0)
+            if os.name == 'nt':
+                msvcrt.locking(descriptor.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(descriptor.fileno(), fcntl.LOCK_UN)
+        descriptor.close()
 
 
 class Worker:
@@ -72,6 +90,8 @@ class Worker:
         self.factory = Factory(config.database, auto_merge=config.auto_merge, auto_paths=config.auto_paths)
         self.workspace = Workspace(config.repo, config.worktrees)
         self.agent_factory = agent_factory
+        self.operations = Operations(config.database, config.budget)
+        self.task_id = None
         self.executor = DockerExecutor(config.isolation, Path(config.artifacts) / 'isolation') if config.isolation.mode == 'docker' else None
         self.browser_factory = browser_factory
         if self.browser_factory is None and config.browser is not None:
@@ -97,13 +117,36 @@ class Worker:
         model = self.config.models.get(role, self.config.models.get('default'))
         if not model:
             raise GateError('No configured model for ' + role)
-        return self.agent_factory(model)
+        agent = self.agent_factory(model)
+        if isinstance(agent, OpenAIAgent):
+            agent.operations, agent.task_id, agent.role = self.operations, self.task_id, role
+        return agent
 
     def step(self, task_id):
         with worker_lock(self.config.database):
+            self.task_id = task_id
+            task = self.factory.get(task_id)
+            if task['state'] in ('HUMAN_REQUIRED', 'ESCALATED', 'RELEASE_READY'):
+                return task
+            if Path(task['repo']).resolve() != self.workspace.repo:
+                raise GateError('Task repository does not match configured repository')
             if self.executor is not None:
                 self.executor.preflight()
-            return self._step(task_id)
+            self.operations.begin(task_id, task['state'], task['data']['attempts'])
+            try:
+                result = self._step(task_id)
+            except BaseException as exc:
+                self.operations.finish(task_id, exc)
+                raise
+            self.operations.finish(task_id)
+            return result
+
+    def recover(self, task_id, reason):
+        with worker_lock(self.config.database):
+            task = self.factory.get(task_id)
+            if Path(task['repo']).resolve() != self.workspace.repo:
+                raise GateError('Task repository does not match configured repository')
+            return self.operations.recover(task_id, reason)
 
     def _step(self, task_id):
         f = self.factory
@@ -133,10 +176,23 @@ class Worker:
         journal_path = artifact_dir / 'checks.json'
 
         if state == 'BUILD_PENDING':
-            journal = []
+            checkpoint_name = 'builder:' + str(data['attempts'])
+            checkpoint = self.operations.checkpoint(task_id, checkpoint_name)
+            journal = self.operations.checkpoint(task_id, checkpoint_name + ':checks') or []
             tools = RepositoryTools(path, writable=True, commands=self.config.checks,
-                                    artifact_dir=artifact_dir, journal=journal, executor=self.executor)
-            result = self._agent('builder').run(f.context(task_id, 'builder', brain), BuildResult, tools)
+                                    artifact_dir=artifact_dir, journal=journal, executor=self.executor,
+                                    on_check=lambda records: self.operations.checkpoint(task_id, checkpoint_name + ':checks', records))
+            if checkpoint:
+                result = BuildResult.model_validate(checkpoint['result'])
+                if self.workspace.fingerprint(path) != checkpoint['fingerprint']:
+                    raise GateError('Workspace differs from builder checkpoint; operator inspection required')
+            else:
+                context = f.context(task_id, 'builder', brain)
+                context['previous_checks'] = journal
+                context['recovery_instruction'] = 'Inspect existing work before editing. Preserve valid red/green receipts; never invent or weaken tests.'
+                result = self._agent('builder').run(context, BuildResult, tools)
+                self.operations.checkpoint(task_id, checkpoint_name,
+                    {'result': result.model_dump(), 'fingerprint': self.workspace.fingerprint(path)})
             # The controller makes the commit; it does not accept an agent-invented SHA.
             self.workspace.git('add', '--all', cwd=path)
             if self.workspace.git('diff', '--cached', '--name-only', cwd=path):

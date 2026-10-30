@@ -16,13 +16,14 @@ def function(name, description, fields):
 
 class RepositoryTools:
     """Capability-limited file tools, not an OS sandbox. Execute only in a worker VM."""
-    def __init__(self, root, *, writable, commands, artifact_dir=None, journal=None, executor=None):
+    def __init__(self, root, *, writable, commands, artifact_dir=None, journal=None, executor=None, on_check=None):
         self.root = Path(root).resolve()
         self.writable = writable
         self.commands = commands
         self.artifact_dir = Path(artifact_dir).resolve() if artifact_dir else None
         self.journal = journal if journal is not None else []
         self.executor = executor
+        self.on_check = on_check
 
     def definitions(self):
         definitions = [function('list_files', 'List source file paths', []),
@@ -105,4 +106,6 @@ class RepositoryTools:
             self.artifact_dir.mkdir(parents=True, exist_ok=True)
             (self.artifact_dir / (record['id'] + '.log')).write_text(output, encoding='utf-8')
         self.journal.append(record)
+        if self.on_check:
+            self.on_check(self.journal)
         return {**record, 'output': output[-24000:]}

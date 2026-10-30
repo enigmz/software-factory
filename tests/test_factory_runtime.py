@@ -94,7 +94,8 @@ def test_unconfigured_ui_never_returns_pass():
 
 
 @pytest.mark.parametrize('visual_pass', [None, False, True])
-def test_worker_executes_real_tdd_and_resumes_each_stage(tmp_path, visual_pass):
+@pytest.mark.parametrize('crash_after_commit', [False, True])
+def test_worker_executes_real_tdd_and_resumes_each_stage(tmp_path, visual_pass, crash_after_commit):
     from factory.contracts import Spec, Review
     from factory.worker import Worker, Config, BuildResult, worker_lock
     repo = tmp_path / 'repo'
@@ -147,6 +148,17 @@ def test_worker_executes_real_tdd_and_resumes_each_stage(tmp_path, visual_pass):
         expected_states = ('BUILD_PENDING', 'VERIFY_PENDING', 'BUILD_PENDING')
     for expected in expected_states:
         worker = Worker(config, agent_factory=Agent, browser_factory=Browser())
+        if expected == 'VERIFY_PENDING' and crash_after_commit:
+            original = worker.factory.set_build
+            def crash(*args):
+                raise RuntimeError('Injected crash after commit')
+            worker.factory.set_build = crash
+            with pytest.raises(RuntimeError, match='Injected'):
+                worker.step(task_id)
+            worker.factory.set_build = original
+            with pytest.raises(GateError, match='recover'):
+                worker.step(task_id)
+            worker.recover(task_id, 'Inspected commit and persisted checks')
         assert worker.step(task_id)['state'] == expected
     if visual_pass is False:
         assert calls == ['spec', 'builder']
