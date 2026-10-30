@@ -7,8 +7,9 @@ Git, Brain versionado y cuatro revisiones independientes.
 El motor, los worktrees, las herramientas del Builder, el adaptador de OpenAI y
 las reglas de aprobación están implementados. La generación completa con agentes
 OpenAI reales sigue pendiente de validación. El harness de UI está implementado con
-Chromium y probado contra una preview local real. Los webhooks y la publicación
-automática de PR/despliegues requieren adaptadores adicionales. Las previews
+Chromium y probado contra una preview local real. El controlador puede publicar
+PRs en borrador y consultar sus checks en GitHub; merge, despliegues y webhooks
+siguen pendientes de integración. Las previews
 estáticas ahora arrancan y se cierran automáticamente durante las revisiones.
 El sistema bloquea las etapas que no tienen esas capacidades; no simula un OK.
 
@@ -230,8 +231,9 @@ contenedores separados del controlador por defecto. El modo explícito `local`
 ejecuta código en el host y solo debe usarse con fixtures de confianza. El daemon,
 la imagen y la configuración Git del repositorio siguen siendo de confianza.
 
-El worker no recibe credenciales de GitHub ni de despliegue y la publicación
-está desactivada. Las rutas sensibles y cambios fuera de `.md`/`.css` no obtienen
+Los contenedores no reciben credenciales de GitHub ni de despliegue. La publicación
+de PRs es una acción explícita del controlador; no realiza merge ni despliegue.
+Las rutas sensibles y cambios fuera de `.md`/`.css` no obtienen
 aprobación automática en la política inicial. Una allowlist de rutas no demuestra
 que un CSS carezca de efectos globales: se requiere revisión y evidencia visual.
 
@@ -253,7 +255,16 @@ se bloquea. `usage` permite inspeccionar consumos y `recover` habilita una
 reanudación explícita sin borrar worktrees, checks ni consumos anteriores.
 Consulta [configuración y garantías de recuperación](docs/operations.md).
 
-## Pruebas
+## Conexión con GitHub
+
+`publish-pr` publica el commit verificado de una tarea como PR en borrador;
+`pr-status` consulta los checks del mismo SHA. La conexión inicial es
+`enigmz/software-factory`. La autenticación de GitHub CLI permanece en el
+controlador y el merge sigue siendo humano. Sin checks requeridos configurados,
+la integración informa `checks_passed: false`.
+Consulta [configuración, permisos y límites](docs/github.md).
+
+## Validación
 
 La suite se valida con Python 3.13 en Windows, incluidas pruebas con Chromium real
 y ciclo de vida de previews: revisión exacta, cierre normal, timeout, fallos del
@@ -284,7 +295,7 @@ ha ejecutado en GitHub Actions. La suite local se ha probado con Python 3.13.
 
 - Ejecución de previews dinámicas y recorridos UX con navegador.
 - Identidad y autorización remotas; almacén de evidencias externo e inmutable.
-- GitHub/GitLab: PR, protección de ramas, checks verificados y merge con SHA esperado.
+- GitHub: activar CI y protección de ramas; merge autorizado con SHA esperado. Adaptador GitLab pendiente.
 - Sentry: autenticación de webhooks, agrupación por incidencia y observación posdespliegue.
 - Proveedor de despliegue, ventanas de observación y reversión idempotente.
 - Recuperación dentro de conversaciones del agente y conciliación con la facturación del proveedor.
