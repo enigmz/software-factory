@@ -16,12 +16,13 @@ def function(name, description, fields):
 
 class RepositoryTools:
     """Capability-limited file tools, not an OS sandbox. Execute only in a worker VM."""
-    def __init__(self, root, *, writable, commands, artifact_dir=None, journal=None):
+    def __init__(self, root, *, writable, commands, artifact_dir=None, journal=None, executor=None):
         self.root = Path(root).resolve()
         self.writable = writable
         self.commands = commands
         self.artifact_dir = Path(artifact_dir).resolve() if artifact_dir else None
         self.journal = journal if journal is not None else []
+        self.executor = executor
 
     def definitions(self):
         definitions = [function('list_files', 'List source file paths', []),
@@ -89,8 +90,11 @@ class RepositoryTools:
         allowed = ('PATH', 'SystemRoot', 'WINDIR', 'TEMP', 'TMP', 'HOME', 'USERPROFILE', 'VIRTUAL_ENV')
         env = {key: os.environ[key] for key in allowed if key in os.environ}
         try:
-            result = subprocess.run(command, cwd=self.root, env=env, capture_output=True,
-                                    text=True, encoding='utf-8', errors='replace', timeout=180, shell=False)
+            if self.executor is not None:
+                result = self.executor.run(self.root, command)
+            else:
+                result = subprocess.run(command, cwd=self.root, env=env, capture_output=True,
+                                        text=True, encoding='utf-8', errors='replace', timeout=180, shell=False)
         except subprocess.TimeoutExpired as exc:
             raise GateError('Check timeout; no passing evidence recorded') from exc
         output = result.stdout + '\n' + result.stderr

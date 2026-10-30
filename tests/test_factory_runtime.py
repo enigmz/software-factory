@@ -37,6 +37,15 @@ def test_refusal_and_incomplete_are_not_success():
             agent.run({}, Risk)
 
 
+def test_api_error_exposes_code_without_echoing_response_message():
+    agent = OpenAIAgent('test-model', api_key='test-secret', transport=httpx.MockTransport(
+        lambda request: httpx.Response(429, json={'error': {'code': 'insufficient_quota',
+            'message': 'Do not print test-secret or prompt content'}})))
+    with pytest.raises(GateError, match='HTTP 429 .*insufficient_quota') as error:
+        agent.run({}, Risk)
+    assert 'test-secret' not in str(error.value)
+
+
 def test_multimodal_tool_output_is_explicit_and_lists_remain_json():
     from factory.tool_output import ToolContent
     for value, expected_type in ((['a.py', 'b.py'], str),
@@ -127,7 +136,7 @@ def test_worker_executes_real_tdd_and_resumes_each_stage(tmp_path, visual_pass):
         def review(self, agent, context, path):
             return agent.run(context, Review)
     config = Config(repo=str(repo), database=str(tmp_path / 'factory.db'), worktrees=str(tmp_path / 'trees'),
-        artifacts=str(tmp_path / 'artifacts'), models={'default': 'fake'}, checks={
+        artifacts=str(tmp_path / 'artifacts'), isolation={'mode': 'local'}, models={'default': 'fake'}, checks={
             'tests': [sys.executable, '-B', 'check.py'],
             'lint': [sys.executable, '-c', 'print("lint fixture")'],
             'acceptance': [sys.executable, '-B', 'check.py']})

@@ -1,0 +1,10 @@
+**
+!docker/
+!docker/Dockerfile
+!docker/runner.py
+!factory/
+!factory/__init__.py
+!factory/contracts.py
+!factory/engine.py
+!factory/browser.py
+!factory/tool_output.py

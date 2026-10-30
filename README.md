@@ -5,10 +5,11 @@ Git, Brain versionado y cuatro revisiones independientes.
 
 **Estado: primera versión del núcleo, no una plataforma de producción completa.**
 El motor, los worktrees, las herramientas del Builder, el adaptador de OpenAI y
-las reglas de aprobación están implementados. Las llamadas reales a OpenAI aún
-no se han validado con credenciales. El harness de UI está implementado con
+las reglas de aprobación están implementados. La generación completa con agentes
+OpenAI reales sigue pendiente de validación. El harness de UI está implementado con
 Chromium y probado contra una preview local real. Los webhooks y la publicación
-automática de PR/despliegues requieren adaptadores adicionales.
+automática de PR/despliegues requieren adaptadores adicionales. Las previews
+estáticas ahora arrancan y se cierran automáticamente durante las revisiones.
 El sistema bloquea las etapas que no tienen esas capacidades; no simula un OK.
 
 ## Instalación
@@ -30,8 +31,12 @@ En Linux usa `.venv/bin/python` en lugar de `.\.venv\Scripts\python.exe`.
    versionados. Copia y adapta los documentos de `brain/` a ese proyecto.
 2. Copia `factory.example.json` a una configuración fuera del worktree del Builder.
    Ajusta rutas absolutas, modelos disponibles en tu cuenta y comandos de checks.
-3. Define `OPENAI_API_KEY` en el entorno del worker. No la guardes en la
-   configuración, en los prompts ni en Git. El código del proyecto y Brain
+3. Define `OPENAI_API_KEY` en el entorno del worker o en `.env` en la raíz del
+   checkout de **software-factory**, con la línea `OPENAI_API_KEY=tu_clave`.
+   El entorno tiene prioridad. Solo se lee ese `.env`, nunca el del repositorio
+   objetivo ni el del worktree; no se exporta la clave a los procesos de tests.
+   `.env` está excluido de Git. No la guardes en la configuración ni en prompts.
+   El código del proyecto y Brain
    enviados al modelo salen del equipo hacia OpenAI.
 4. Registra una tarea y ejecuta el orquestador:
 
@@ -129,6 +134,32 @@ con puerto explícito, por ejemplo `http://127.0.0.1:8765`. El resto de opciones
 está en `factory.example.json`. La CLI conecta automáticamente el harness al
 worker cuando existe esa configuración. Sin ella, la revisión UI sigue bloqueada.
 
+### Preview automática (sitios estáticos)
+
+Añade a la configuración de la factory `"preview": {"directory": "dist",
+"startup_timeout": 10.0}` y conserva la sección `browser` para sus límites.
+`directory` debe contener los archivos HTML/CSS versionados y un `index.html`.
+
+Antes de cada validación visual o revisión UI, el worker abre un servidor propio
+en loopback con un puerto libre, comprueba la página inicial y el SHA y pasa su
+URL al harness. En este modo se sustituye `browser.base_url` durante la llamada;
+no es necesario arrancar una preview manual ni reservar un puerto.
+Al terminar, incluso si el agente lanza una excepción, el servidor se cierra.
+La siguiente revisión vuelve a abrir la revisión correcta, también tras reanudar
+el worker. El Builder y los revisores de código no mantienen un servidor activo.
+
+El servidor vive en un hilo del worker, no en un proceso de aplicación separado.
+Al terminar el proceso no queda un servidor independiente huérfano. Los registros
+`artifacts/previews/SESSION/preview.json` guardan SHA, URL, tiempos y resultado del
+ciclo de vida; una caída abrupta puede dejar el registro sin estado de cierre.
+`outcome: success` significa que el ciclo se cerró sin excepción, no que UI aprobara.
+
+Esta automatización sirve archivos estáticos directamente desde Git. No ejecuta
+builds ni servidores de aplicaciones dinámicas; esos adaptadores quedan pendientes.
+Si omites `preview` o lo defines como `null`, se conserva el modo externo manual.
+
+### Preview externa o manual
+
 La preview debe responder en `/.factory/revision` con **exactamente**
 `{"commit":"SHA_COMPLETO"}`. El servicio que publica ese identificador es una
 frontera de confianza: debe servir realmente esa revisión, con datos sintéticos,
@@ -145,7 +176,7 @@ Este servidor lee los archivos directamente del objeto Git, no del checkout.
 Los cambios locales posteriores no alteran lo que se muestra. No sirve archivos
 ocultos, enlaces simbólicos ni rutas fuera del directorio público. Para una app
 dinámica necesitas un servicio de preview aislado con el mismo contrato de revisión.
-El orquestador no inicia ni reconstruye automáticamente esa app.
+El orquestador todavía no inicia ni reconstruye automáticamente apps dinámicas.
 
 Puedes verificar el navegador sin llamar a OpenAI:
 
@@ -154,6 +185,7 @@ python -m factory browser-check --config factory.local.json --commit SHA_COMPLET
 ```
 
 Este smoke test captura escritorio y móvil y devuelve la carpeta de evidencias.
+Con `preview` configurado también arranca, verifica y cierra el servidor automáticamente.
 **No aprueba el diseño ni sus criterios de aceptación.**
 
 Para una revisión de agente, `models.ui` debe admitir imágenes, function calling
@@ -193,22 +225,31 @@ son una API interna de confianza: quien tiene acceso de escritura a la base de
 datos o puede invocar directamente esas funciones puede falsificar evidencias.
 El historial es transaccional, pero no es un registro criptográfico inmutable.
 
-**Un worktree no es un sandbox.** Ejecutar tests ejecuta código del repositorio.
-Los límites de rutas y el filtrado de variables del proceso no sustituyen el
-aislamiento del sistema operativo. Para trabajo autónomo sobre código no confiable,
-usa workers efímeros aislados sin acceso al control plane, secretos de producción
-o credenciales de merge. La separación física de permisos no se provisiona aquí.
+**Un worktree no es un sandbox.** Los checks y previews se ejecutan ahora en
+contenedores separados del controlador por defecto. El modo explícito `local`
+ejecuta código en el host y solo debe usarse con fixtures de confianza. El daemon,
+la imagen y la configuración Git del repositorio siguen siendo de confianza.
 
 El worker no recibe credenciales de GitHub ni de despliegue y la publicación
 está desactivada. Las rutas sensibles y cambios fuera de `.md`/`.css` no obtienen
 aprobación automática en la política inicial. Una allowlist de rutas no demuestra
 que un CSS carezca de efectos globales: se requiere revisión y evidencia visual.
 
-## Pruebas
+## Aislamiento de workers
 
-Validación local del harness: **33 pruebas pasan** con Python 3.13 en Windows,
-incluidas pruebas con Chromium real. La integración con OpenAI usa respuestas
-simuladas; todavía queda pendiente validarla con una clave API real.
+Los checks y el navegador usan Docker Linux por defecto: contenedores efímeros,
+sin red ni credenciales del controlador, usuario sin privilegios y límites de
+recursos. Si Docker no está disponible, la ejecución se bloquea. Antes de usar
+el worker, construye la imagen con
+`docker build -f docker/Dockerfile -t software-factory-worker:local .`.
+Consulta [preparación, límites y pruebas de aislamiento](docs/isolation.md).
+
+## Validación
+
+La suite se valida con Python 3.13 en Windows, incluidas pruebas con Chromium real
+y ciclo de vida de previews: revisión exacta, cierre normal, timeout, fallos del
+agente y coexistencia de servidores. Las pruebas de OpenAI usan respuestas simuladas;
+el recorrido completo con generación real sigue pendiente de validación.
 
 Las pruebas cubren deduplicación concurrente, persistencia, transiciones inválidas,
 revisiones obsoletas, cuatro revisores distintos, límites de corrección, riesgo,
@@ -233,7 +274,7 @@ ha ejecutado en GitHub Actions. La suite local se ha probado con Python 3.13.
 ## Próximas integraciones
 
 - Ejecución de previews dinámicas y recorridos UX con navegador.
-- Identidad y autorización remotas; aislamiento real de workers y del almacén de evidencias.
+- Identidad y autorización remotas; almacén de evidencias externo e inmutable.
 - GitHub/GitLab: PR, protección de ramas, checks verificados y merge con SHA esperado.
 - Sentry: autenticación de webhooks, agrupación por incidencia y observación posdespliegue.
 - Proveedor de despliegue, ventanas de observación y reversión idempotente.

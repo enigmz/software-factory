@@ -2,11 +2,14 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from contextlib import ExitStack
 
 from .contracts import Spec, Build, Review, Verification, Risk
 from .engine import Factory, GateError
 from .worker import Config, Worker
 from .browser import BrowserSession
+from .preview import ManagedPreview
+from .isolated_browser import DockerBrowserSession
 
 
 def main():
@@ -41,7 +44,17 @@ def main():
             config = Config.model_validate_json(Path(args.config).read_text(encoding='utf-8'))
             if config.browser is None:
                 raise GateError('Configure browser.base_url first')
-            with BrowserSession(config.browser, args.commit, Path(config.artifacts) / 'browser') as session:
+            with ExitStack() as stack:
+                browser_config = config.browser
+                if config.isolation.mode == 'docker':
+                    session = stack.enter_context(DockerBrowserSession(config.repo, args.commit,
+                        config.preview, config.browser, config.isolation, config.artifacts))
+                elif config.preview is not None:
+                    preview = stack.enter_context(ManagedPreview(config.repo, args.commit, config.preview,
+                        Path(config.artifacts) / 'previews'))
+                    browser_config = browser_config.model_copy(update={'base_url': preview.url})
+                if config.isolation.mode != 'docker':
+                    session = stack.enter_context(BrowserSession(browser_config, args.commit, Path(config.artifacts) / 'browser'))
                 session.call('screenshot', {})
                 session.call('viewport', {'device': 'mobile'})
                 session.call('screenshot', {})

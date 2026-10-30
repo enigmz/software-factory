@@ -9,11 +9,110 @@ import json
 import mimetypes
 import re
 import subprocess
+import threading
+import time
+import uuid
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from urllib.parse import unquote, urlsplit
 
 from .engine import GateError
+from .contracts import Contract
+import httpx
+from pydantic import Field, field_validator
+
+
+class PreviewConfig(Contract):
+    directory: str
+    startup_timeout: float = Field(default=10.0, ge=0.1, le=60)
+
+    @field_validator('directory')
+    @classmethod
+    def public_directory(cls, value):
+        if not value or value.startswith(('/', '.')) or '\\' in value or ':' in value or any(
+                part in ('', '.', '..') or part.startswith('.') for part in value.split('/')):
+            raise ValueError('Preview directory must be a public repository-relative directory')
+        return value
+
+
+class ManagedPreview:
+    """Own one loopback server per check; daemon threads cannot outlive the worker.
+
+    There is no application subprocess to orphan or external PID to terminate.
+    A fresh port avoids collisions with manual previews and other tasks.
+    """
+    def __init__(self, repo, commit, config, artifacts):
+        self.repo, self.commit, self.config = repo, commit, config
+        self.manifest = Path(artifacts).resolve() / uuid.uuid4().hex / 'preview.json'
+        self.server = self.thread = None
+        self.url = None
+        self.record = {'commit': commit, 'directory': config.directory, 'state': 'starting',
+                       'outcome': 'pending', 'started_at': datetime.now(timezone.utc).isoformat()}
+
+    def _save(self):
+        self.manifest.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.manifest.with_suffix('.tmp')
+        temporary.write_text(json.dumps(self.record, indent=2), encoding='utf-8')
+        temporary.replace(self.manifest)
+
+    def __enter__(self):
+        self._save()
+        try:
+            preview = GitPreview(self.repo, self.commit, self.config.directory)
+            self.server = preview.server(0)
+            self.url = f'http://127.0.0.1:{self.server.server_port}'
+            self.thread = threading.Thread(target=self.server.serve_forever,
+                kwargs={'poll_interval': 0.05}, daemon=True, name='factory-preview')
+            self.thread.start()
+            self._ready()
+            self.record.update(state='ready', url=self.url)
+            self._save()
+            return self
+        except BaseException:
+            self._close('error')
+            raise
+
+    def _ready(self):
+        deadline = time.monotonic() + self.config.startup_timeout
+        with httpx.Client(trust_env=False, follow_redirects=False) as client:
+            while time.monotonic() < deadline:
+                remaining = max(0.01, deadline - time.monotonic())
+                try:
+                    revision = client.get(self.url + '/.factory/revision', timeout=min(1, remaining))
+                    if revision.status_code != 200 or revision.json() != {'commit': self.commit}:
+                        raise GateError('Preview revision mismatch')
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    page = client.get(self.url, timeout=min(1, remaining))
+                    if page.status_code != 200:
+                        raise GateError('Preview entry page is unavailable; check directory/index.html')
+                    if time.monotonic() <= deadline:
+                        return
+                except httpx.TransportError:
+                    time.sleep(min(0.05, max(0, deadline - time.monotonic())))
+                except ValueError as exc:
+                    raise GateError('Preview revision is invalid') from exc
+        raise GateError('Preview readiness timed out')
+
+    def _close(self, outcome):
+        try:
+            if self.server:
+                if self.thread and self.thread.is_alive():
+                    self.server.shutdown()
+                self.server.server_close()
+                if self.thread:
+                    self.thread.join(timeout=2)
+                    if self.thread.is_alive():
+                        raise GateError('Preview thread failed to stop')
+        finally:
+            self.record.update(state='stopped', outcome=outcome, url=self.url,
+                               stopped_at=datetime.now(timezone.utc).isoformat())
+            self._save()
+
+    def __exit__(self, exc_type, exc, traceback):
+        self._close('error' if exc_type else 'success')
 
 
 class GitPreview:

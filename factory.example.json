@@ -14,6 +14,17 @@
   },
   "auto_merge": false,
   "auto_paths": [],
+  "isolation": {
+    "mode": "docker",
+    "image": "software-factory-worker:local",
+    "memory_mb": 1536,
+    "cpus": 2,
+    "timeout_seconds": 180
+  },
+  "preview": {
+    "directory": "dist",
+    "startup_timeout": 10.0
+  },
   "browser": {
     "base_url": "http://127.0.0.1:8765",
     "headless": true,

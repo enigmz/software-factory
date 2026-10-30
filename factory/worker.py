@@ -4,7 +4,7 @@ import os
 from contextlib import contextmanager
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from .contracts import Contract, Spec, Review, Risk, Build, Text, Verification
 from .engine import Factory, GateError, ROLES
@@ -12,6 +12,10 @@ from .openai_agents import OpenAIAgent
 from .runtime import RepositoryTools
 from .workspace import Workspace
 from .browser import BrowserConfig, BrowserHarness
+from .preview import PreviewConfig
+from .managed_browser import ManagedBrowserHarness
+from .isolation import IsolationConfig, DockerExecutor
+from .isolated_browser import DockerBrowserHarness
 
 
 class BuildResult(Contract):
@@ -28,6 +32,16 @@ class Config(Contract):
     auto_merge: bool = False
     auto_paths: list[str] = Field(default_factory=list)
     browser: BrowserConfig | None = None
+    preview: PreviewConfig | None = None
+    isolation: IsolationConfig = Field(default_factory=IsolationConfig)
+
+    @model_validator(mode='after')
+    def preview_requires_browser(self):
+        if self.preview is not None and self.browser is None:
+            raise ValueError('Managed preview requires browser configuration')
+        if self.isolation.mode == 'docker' and self.browser is not None and self.preview is None:
+            raise ValueError('Isolated browser requires a managed static preview')
+        return self
 
 
 def require_browser(browser):
@@ -58,9 +72,17 @@ class Worker:
         self.factory = Factory(config.database, auto_merge=config.auto_merge, auto_paths=config.auto_paths)
         self.workspace = Workspace(config.repo, config.worktrees)
         self.agent_factory = agent_factory
+        self.executor = DockerExecutor(config.isolation, Path(config.artifacts) / 'isolation') if config.isolation.mode == 'docker' else None
         self.browser_factory = browser_factory
         if self.browser_factory is None and config.browser is not None:
-            self.browser_factory = BrowserHarness(config.browser, Path(config.artifacts) / 'browser', lambda: self._agent('ui'))
+            if config.isolation.mode == 'docker':
+                self.browser_factory = DockerBrowserHarness(self.workspace.repo, config.preview, config.browser,
+                    config.isolation, Path(config.artifacts), lambda: self._agent('ui'))
+            elif config.preview is not None:
+                self.browser_factory = ManagedBrowserHarness(self.workspace.repo, config.preview, config.browser,
+                    Path(config.artifacts), lambda: self._agent('ui'))
+            else:
+                self.browser_factory = BrowserHarness(config.browser, Path(config.artifacts) / 'browser', lambda: self._agent('ui'))
 
     def brain(self, revision):
         files = self.workspace.git('ls-tree', '-r', '--name-only', revision, '--', 'brain').splitlines()
@@ -79,6 +101,8 @@ class Worker:
 
     def step(self, task_id):
         with worker_lock(self.config.database):
+            if self.executor is not None:
+                self.executor.preflight()
             return self._step(task_id)
 
     def _step(self, task_id):
@@ -111,7 +135,7 @@ class Worker:
         if state == 'BUILD_PENDING':
             journal = []
             tools = RepositoryTools(path, writable=True, commands=self.config.checks,
-                                    artifact_dir=artifact_dir, journal=journal)
+                                    artifact_dir=artifact_dir, journal=journal, executor=self.executor)
             result = self._agent('builder').run(f.context(task_id, 'builder', brain), BuildResult, tools)
             # The controller makes the commit; it does not accept an agent-invented SHA.
             self.workspace.git('add', '--all', cwd=path)
@@ -131,7 +155,7 @@ class Worker:
         if state == 'VERIFY_PENDING':
             if not {'tests', 'lint', 'acceptance'}.issubset(self.config.checks):
                 raise GateError('Configure independent tests, lint and acceptance commands')
-            tools = RepositoryTools(path, writable=False, commands=self.config.checks, artifact_dir=artifact_dir)
+            tools = RepositoryTools(path, writable=False, commands=self.config.checks, artifact_dir=artifact_dir, executor=self.executor)
             checks = {name: tools.run_check(name) for name in ('tests', 'lint', 'acceptance')}
             journal = json.loads(journal_path.read_text(encoding='utf-8'))
             task_evidence = {}
