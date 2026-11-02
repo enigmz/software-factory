@@ -70,7 +70,7 @@ def test_task_cannot_publish_before_review_or_enable_auto_merge(tmp_path):
     publisher.client.api = lambda *args, **kwargs: pytest.fail('No network before approval gates')
     with pytest.raises(GateError, match='four reviews'):
         publisher.publish(task['id'])
-    with pytest.raises(ValueError, match='human merge'):
+    with pytest.raises(ValueError, match='explicit paths'):
         Config(repo=str(tmp_path), models={}, checks={}, auto_merge=True,
                github={'repository': 'enigmz/software-factory'})
 

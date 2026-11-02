@@ -51,11 +51,11 @@ class GitHubClient:
         self.config = config
         self.prefix = 'repos/' + config.repository
 
-    def api(self, path, payload=None):
+    def api(self, path, payload=None, *, method='POST'):
         command = ['gh', 'api', '--hostname', 'github.com', self.prefix + '/' + path,
                    '-H', 'Accept: application/vnd.github+json']
         if payload is not None:
-            command += ['--method', 'POST', '--input', '-']
+            command += ['--method', method, '--input', '-']
         try:
             result = subprocess.run(command, input=json.dumps(payload) if payload is not None else None,
                 capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=60, shell=False)
@@ -106,15 +106,53 @@ class GitHubClient:
         for status in statuses:
             latest.setdefault(status.get('context'), status)
         # Detect a head change while checks were being fetched.
-        validate_pr(self.api('pulls/' + str(number)), self.config, branch, commit)
+        pr = self.api('pulls/' + str(number))
+        validate_pr(pr, self.config, branch, commit)
         return {'url': pr['html_url'], 'commit': commit, 'state': pr['state'], 'draft': pr['draft'],
                 'merged': bool(pr.get('merged')), 'mergeable': pr.get('mergeable'),
+                'merge_commit': pr.get('merge_commit_sha') if pr.get('merged') else None,
                 'checks_passed': evaluate_checks(checks, list(latest.values()),
                     [r.model_dump() for r in self.config.required_checks], commit),
                 'required_checks_configured': bool(self.config.required_checks),
                 'checks': [{'name': c.get('name'), 'app_id': c.get('app', {}).get('id'),
                             'status': c.get('status'), 'conclusion': c.get('conclusion')} for c in checks],
-                'human_merge_required': True}
+                'merge_authorized': False}
+
+    def merge(self, number, branch, commit, base, paths):
+        """GitHub enforces protection; the expected SHA prevents a changed-head merge."""
+        from urllib.parse import quote
+        protection = self.api('branches/' + quote(self.config.base, safe='') + '/protection')
+        rules = protection.get('required_status_checks') or {}
+        expected = {(c.name, c.app_id) for c in self.config.required_checks}
+        protected = {(c.get('context'), c.get('app_id')) for c in rules.get('checks', [])}
+        if (not expected or not expected <= protected or rules.get('strict') is not True
+                or protection.get('enforce_admins', {}).get('enabled') is not True):
+            raise GateError('Required GitHub branch protection is missing or weaker than configuration')
+        pr = self.api('pulls/' + str(number))
+        validate_pr(pr, self.config, branch, commit)
+        if pr.get('merged') or pr['state'] != 'open' or pr['base'].get('sha') != base:
+            raise GateError('PR is closed or base changed; inspect and reverify the build')
+        files = self.pages('pulls/' + str(number) + '/files')
+        actual = {p for f in files for p in (f.get('filename'), f.get('previous_filename')) if p}
+        if actual != set(paths):
+            raise GateError('Remote diff differs from reviewed paths')
+        if pr.get('draft'):
+            try:
+                result = subprocess.run(['gh', 'pr', 'ready', pr['html_url']], capture_output=True,
+                                        text=True, timeout=60, shell=False)
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                raise GateError('PR readiness outcome unknown; retry reconciliation') from exc
+            if result.returncode:
+                raise GateError('Cannot mark PR ready; inspect GitHub')
+        status = self.status(number, branch, commit)
+        if status['merged']:
+            return
+        if status['state'] != 'open' or not status['checks_passed']:
+            raise GateError('Remote CI must pass before merge')
+        result = self.api('pulls/' + str(number) + '/merge',
+                          {'sha': commit, 'merge_method': 'merge'}, method='PUT')
+        if result.get('merged') is not True:
+            raise GateError('GitHub did not confirm merge; reconcile before retrying')
 
 
 class GitHubPublisher:
@@ -123,7 +161,7 @@ class GitHubPublisher:
             raise GateError('Configure github.repository first')
         self.config = config
         self.client = client or GitHubClient(config.github)
-        self.factory = Factory(config.database)
+        self.factory = Factory(config.database, auto_merge=config.auto_merge, auto_paths=config.auto_paths)
         self.workspace = Workspace(config.repo, config.worktrees)
 
     def _task(self, task_id):
@@ -167,7 +205,8 @@ class GitHubPublisher:
             # Do not upload prompts, Brain, logs or screenshots to a public repository.
             body = ('Factory task `' + task_id + '`\n\nReviewed commit: `' + commit + '`\n\n'
                     'Independent verification and all four local reviews passed. '
-                    'Remote CI and human approval are still required. No automatic merge or deployment.')
+                    'Remote CI and controller release authorization are still required. '
+                    'Merge follows the configured risk policy. No deployment is performed.')
             pr = self.client.ensure_draft(branch, commit, 'Factory task ' + task_id, body)
             record = {'number': pr['number'], 'url': pr['html_url'], 'branch': branch, 'commit': commit}
             if data.get('github_pr') == record:
@@ -186,3 +225,71 @@ class GitHubPublisher:
         if task['data']['build']['commit'] != record['commit']:
             raise GateError('Published PR is stale for current task')
         return self.client.status(record['number'], record['branch'], record['commit'])
+
+    def advance(self, task_id):
+        """One resumable release step. Never generates code or calls a model."""
+        from .worker import worker_lock
+        task = self._task(task_id)
+        if task['state'] in ('HUMAN_REQUIRED', 'RELEASE_READY') and not task['data'].get('github_pr'):
+            self.publish(task_id)
+        with worker_lock(self.config.database):
+            task = self._task(task_id)
+            if task['state'] in ('MERGED', 'OBSERVING', 'COMPLETED', 'ROLLBACK_REQUIRED', 'ROLLED_BACK'):
+                return task
+            if task['state'] not in ('HUMAN_REQUIRED', 'RELEASE_READY'):
+                raise GateError('Task must finish reviews and risk assessment before release')
+            data = task['data']
+            commit = data['build']['commit']
+            for role in ROLES:
+                review = data['reviews'].get(role, {})
+                if review.get('verdict') != 'PASS' or review.get('commit') != commit:
+                    raise GateError('All four current reviews must pass')
+            verification = data['verification']
+            if (verification['commit'] != commit or data['risk']['commit'] != commit
+                    or not all(verification['checks'].get(k) is True for k in ('tests', 'lint', 'acceptance'))
+                    or not all(verification['checks'].values())):
+                raise GateError('Stale or failed verification/risk')
+            status = self.status(task_id)
+            if not status['merged']:
+                if status['state'] != 'open':
+                    raise GateError('PR closed without merge; operator action required')
+                if task['state'] == 'HUMAN_REQUIRED':
+                    return task
+                approval = data.get('human_approval', {})
+                human = approval.get('commit') == commit and bool(approval.get('actor', '').strip())
+                risk = data['risk']
+                # Re-evaluate current config: revoking permission must affect queued tasks.
+                policy = Factory(self.config.database, auto_paths=self.config.auto_paths)
+                automatic = (self.config.auto_merge and risk['level'] == 'low'
+                             and risk['reversible'] and not risk['uncertain']
+                             and policy.policy_allows(data['build']['changed_files']))
+                if not human and not automatic:
+                    raise GateError('Current merge authorization is missing')
+                if not status['checks_passed']:
+                    return task
+                record = data['github_pr']
+                intent = {'commit': commit, 'pr': record['number'],
+                          'authorization': 'human' if human else 'automatic'}
+                if data.get('merge_intent') != intent:
+                    def remember(current):
+                        self.factory._same_commit(current, commit)
+                        current['data']['merge_intent'] = intent
+                    self.factory._change(task_id, ['RELEASE_READY'], 'merge_requested', intent, remember)
+                self.client.merge(record['number'], record['branch'], commit,
+                                  data['build']['base_commit'], data['build']['changed_files'])
+                status = self.status(task_id)
+            if not status['merged'] or not status['checks_passed']:
+                raise GateError('Merge not yet verified; retry reconciliation')
+            merge_commit = status.get('merge_commit')
+            if not isinstance(merge_commit, str) or not re.fullmatch(r'[0-9a-f]{40}', merge_commit):
+                raise GateError('Missing verified merge commit')
+            receipt = {'reviewed_commit': commit, 'merge_commit': merge_commit,
+                       'pr_url': status['url'], 'source': 'github'}
+            def update(current):
+                self.factory._same_commit(current, commit)
+                if current['data']['github_pr'] != data['github_pr']:
+                    raise GateError('Published PR changed during reconciliation')
+                current['data']['release'] = receipt
+                current['state'] = 'MERGED'
+            return self.factory._change(task_id, ['HUMAN_REQUIRED', 'RELEASE_READY'],
+                                        'merged', receipt, update)
