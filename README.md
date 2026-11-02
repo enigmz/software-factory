@@ -285,17 +285,18 @@ de Chromium usa `python -m pytest -q -m browser`; para todo, usa
 para abrir y conectar sockets locales. En Linux, instala además las bibliotecas
 del sistema con `python -m playwright install --with-deps chromium`.
 
-La configuración de CI está en `ci/github-actions.yml` como plantilla inactiva:
-la sesión de publicación no tiene el permiso OAuth `workflow`. Para activarla,
-autoriza ese permiso y mueve el archivo a `.github/workflows/tests.yml`.
-La matriz prevista cubre Windows y Linux con Python 3.11 y 3.13; todavía no se
-ha ejecutado en GitHub Actions. La suite local se ha probado con Python 3.13.
+El workflow de CI está en `.github/workflows/tests.yml`: se ejecuta con cada push
+y pull request, y permite ejecución manual. Cubre Windows y Linux con Python
+3.11 y 3.13, Chromium real y un job Linux de aislamiento Docker con la imagen
+construida desde el repositorio. No necesita secretos ni llamadas a OpenAI.
+Publicarlo requiere el permiso OAuth `workflow`. Los resultados remotos se
+consultan en GitHub Actions; configurar CI no activa la protección de `main`.
 
 ## Próximas integraciones
 
 - Ejecución de previews dinámicas y recorridos UX con navegador.
 - Identidad y autorización remotas; almacén de evidencias externo e inmutable.
-- GitHub: activar CI y protección de ramas; merge autorizado con SHA esperado. Adaptador GitLab pendiente.
+- GitHub: protección de ramas y checks obligatorios; merge autorizado con SHA esperado. Adaptador GitLab pendiente.
 - Sentry: autenticación de webhooks, agrupación por incidencia y observación posdespliegue.
 - Proveedor de despliegue, ventanas de observación y reversión idempotente.
 - Recuperación dentro de conversaciones del agente y conciliación con la facturación del proveedor.

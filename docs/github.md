@@ -49,9 +49,9 @@ no pasa. Una lista vacía tampoco pasa. Otros checks pendientes/fallidos bloquea
 ## Estado de la primera conexión
 
 El 30 de octubre de 2026 se verificó acceso ADMIN como `enigmz`. `main` no estaba
-protegida y no había workflows activos. La sesión OAuth tiene `repo`, sin
-`workflow`; la plantilla `ci/github-actions.yml` sigue inactiva. Para obtener CI,
-activa ese permiso y publica la plantilla en `.github/workflows/tests.yml`,
+protegida y no había workflows activos. El workflow ahora se define en
+`.github/workflows/tests.yml`, con matriz Windows/Linux, Chromium e integración
+Docker. Su publicación requiere el permiso OAuth `workflow`. Tras publicarlo,
 observa los nombres/IDs reales y configura los checks requeridos. Después aplica
 protección de rama en GitHub con revisión y checks obligatorios.
 
