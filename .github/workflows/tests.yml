@@ -1,0 +1,65 @@
+name: Factory tests
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: factory-tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
+jobs:
+  tests:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ['3.11', '3.13']
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+      - run: python -m pip install -r requirements.txt
+      - run: python -m pytest -q
+  browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+      - run: python -m pip install -r requirements-browser.txt
+      - run: python -m playwright install --with-deps chromium
+      - name: Allow Chromium sandbox user namespaces
+        # Scope Ubuntu's user-namespace exception to the downloaded test browser.
+        run: |
+          sudo tee /etc/apparmor.d/factory-playwright > /dev/null <<'PROFILE'
+          abi <abi/4.0>,
+          include <tunables/global>
+          profile factory-playwright /home/runner/.cache/ms-playwright/chromium_headless_shell-*/chrome-headless-shell-linux64/chrome-headless-shell flags=(unconfined) {
+            userns,
+          }
+          PROFILE
+          sudo apparmor_parser -r /etc/apparmor.d/factory-playwright
+      - run: python -m pytest -q -m browser
+  docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+      - run: python -m pip install -r requirements-browser.txt
+      - run: docker build -t software-factory-worker:local -f docker/Dockerfile .
+      - run: python -m pytest -q tests/test_docker_integration.py
+        env:
+          FACTORY_TEST_DOCKER: '1'

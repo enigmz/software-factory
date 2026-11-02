@@ -11,6 +11,7 @@ from .browser import BrowserSession
 from .preview import ManagedPreview
 from .isolated_browser import DockerBrowserSession
 from .operations import Operations
+from .github import GitHubPublisher
 
 
 def main():
@@ -43,12 +44,20 @@ def main():
     recover.add_argument('task_id')
     recover.add_argument('--config', required=True)
     recover.add_argument('--reason', required=True)
+    for name in ('publish-pr', 'pr-status'):
+        github = commands.add_parser(name)
+        github.add_argument('task_id')
+        github.add_argument('--config', required=True)
     args = parser.parse_args()
     try:
         if args.command == 'schema':
             result = {c.__name__: c for c in (Spec, Build, Review, Verification, Risk)}[args.name].model_json_schema()
         elif args.command == 'usage':
             result = Operations(args.db).usage(args.task_id)
+        elif args.command in ('publish-pr', 'pr-status'):
+            config = Config.model_validate_json(Path(args.config).read_text(encoding='utf-8'))
+            publisher = GitHubPublisher(config)
+            result = publisher.publish(args.task_id) if args.command == 'publish-pr' else publisher.status(args.task_id)
         elif args.command == 'recover':
             config = Config.model_validate_json(Path(args.config).read_text(encoding='utf-8'))
             result = Worker(config).recover(args.task_id, args.reason)

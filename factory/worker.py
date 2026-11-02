@@ -17,6 +17,7 @@ from .managed_browser import ManagedBrowserHarness
 from .isolation import IsolationConfig, DockerExecutor
 from .isolated_browser import DockerBrowserHarness
 from .operations import Budget, Operations
+from .github import GitHubConfig
 
 
 class BuildResult(Contract):
@@ -36,9 +37,12 @@ class Config(Contract):
     preview: PreviewConfig | None = None
     isolation: IsolationConfig = Field(default_factory=IsolationConfig)
     budget: Budget = Field(default_factory=Budget)
+    github: GitHubConfig | None = None
 
     @model_validator(mode='after')
     def preview_requires_browser(self):
+        if self.github is not None and self.auto_merge:
+            raise ValueError('GitHub integration currently requires human merge; disable auto_merge')
         if self.preview is not None and self.browser is None:
             raise ValueError('Managed preview requires browser configuration')
         if self.isolation.mode == 'docker' and self.browser is not None and self.preview is None:
