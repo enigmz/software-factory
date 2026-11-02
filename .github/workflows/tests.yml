@@ -37,6 +37,17 @@ jobs:
           cache: pip
       - run: python -m pip install -r requirements-browser.txt
       - run: python -m playwright install --with-deps chromium
+      - name: Allow Chromium sandbox user namespaces
+        # Scope Ubuntu's user-namespace exception to the downloaded test browser.
+        run: |
+          sudo tee /etc/apparmor.d/factory-playwright > /dev/null <<'PROFILE'
+          abi <abi/4.0>,
+          include <tunables/global>
+          profile factory-playwright /home/runner/.cache/ms-playwright/chromium_headless_shell-*/chrome-headless-shell-linux64/chrome-headless-shell flags=(unconfined) {
+            userns,
+          }
+          PROFILE
+          sudo apparmor_parser -r /etc/apparmor.d/factory-playwright
       - run: python -m pytest -q -m browser
   docker:
     runs-on: ubuntu-latest
