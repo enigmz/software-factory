@@ -44,7 +44,7 @@ def main():
     recover.add_argument('task_id')
     recover.add_argument('--config', required=True)
     recover.add_argument('--reason', required=True)
-    for name in ('publish-pr', 'pr-status'):
+    for name in ('publish-pr', 'pr-status', 'release-step'):
         github = commands.add_parser(name)
         github.add_argument('task_id')
         github.add_argument('--config', required=True)
@@ -54,10 +54,12 @@ def main():
             result = {c.__name__: c for c in (Spec, Build, Review, Verification, Risk)}[args.name].model_json_schema()
         elif args.command == 'usage':
             result = Operations(args.db).usage(args.task_id)
-        elif args.command in ('publish-pr', 'pr-status'):
+        elif args.command in ('publish-pr', 'pr-status', 'release-step'):
             config = Config.model_validate_json(Path(args.config).read_text(encoding='utf-8'))
             publisher = GitHubPublisher(config)
-            result = publisher.publish(args.task_id) if args.command == 'publish-pr' else publisher.status(args.task_id)
+            action = {'publish-pr': publisher.publish, 'pr-status': publisher.status,
+                      'release-step': publisher.advance}[args.command]
+            result = action(args.task_id)
         elif args.command == 'recover':
             config = Config.model_validate_json(Path(args.config).read_text(encoding='utf-8'))
             result = Worker(config).recover(args.task_id, args.reason)
@@ -88,7 +90,10 @@ def main():
             worker = Worker(config)
             for _ in range(1 if args.command == 'step' else 20):
                 result = worker.step(args.task_id)
-                if result['state'] in ('HUMAN_REQUIRED', 'ESCALATED', 'RELEASE_READY'):
+                if args.command == 'run' and config.github and result['state'] in ('HUMAN_REQUIRED', 'RELEASE_READY'):
+                    result = GitHubPublisher(config).advance(args.task_id)
+                if result['state'] in ('HUMAN_REQUIRED', 'ESCALATED', 'RELEASE_READY', 'MERGED',
+                                       'OBSERVING', 'COMPLETED', 'ROLLBACK_REQUIRED', 'ROLLED_BACK'):
                     break
         else:
             factory = Factory(args.db)

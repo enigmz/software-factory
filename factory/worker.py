@@ -41,8 +41,8 @@ class Config(Contract):
 
     @model_validator(mode='after')
     def preview_requires_browser(self):
-        if self.github is not None and self.auto_merge:
-            raise ValueError('GitHub integration currently requires human merge; disable auto_merge')
+        if self.github is not None and self.auto_merge and (not self.github.required_checks or not self.auto_paths):
+            raise ValueError('Automatic GitHub merge requires explicit paths and required checks')
         if self.preview is not None and self.browser is None:
             raise ValueError('Managed preview requires browser configuration')
         if self.isolation.mode == 'docker' and self.browser is not None and self.preview is None:
@@ -130,7 +130,8 @@ class Worker:
         with worker_lock(self.config.database):
             self.task_id = task_id
             task = self.factory.get(task_id)
-            if task['state'] in ('HUMAN_REQUIRED', 'ESCALATED', 'RELEASE_READY'):
+            if task['state'] in ('HUMAN_REQUIRED', 'ESCALATED', 'RELEASE_READY', 'MERGED',
+                                 'OBSERVING', 'COMPLETED', 'ROLLBACK_REQUIRED', 'ROLLED_BACK'):
                 return task
             if Path(task['repo']).resolve() != self.workspace.repo:
                 raise GateError('Task repository does not match configured repository')

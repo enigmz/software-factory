@@ -8,7 +8,8 @@ El motor, los worktrees, las herramientas del Builder, el adaptador de OpenAI y
 las reglas de aprobación están implementados. La generación completa con agentes
 OpenAI reales sigue pendiente de validación. El harness de UI está implementado con
 Chromium y probado contra una preview local real. El controlador puede publicar
-PRs en borrador y consultar sus checks en GitHub; merge, despliegues y webhooks
+PRs en borrador, verificar CI, fusionar un SHA autorizado y recuperar el recibo
+de merge de GitHub. Despliegues y webhooks
 siguen pendientes de integración. Las previews
 estáticas ahora arrancan y se cierran automáticamente durante las revisiones.
 El sistema bloquea las etapas que no tienen esas capacidades; no simula un OK.
@@ -231,8 +232,8 @@ contenedores separados del controlador por defecto. El modo explícito `local`
 ejecuta código en el host y solo debe usarse con fixtures de confianza. El daemon,
 la imagen y la configuración Git del repositorio siguen siendo de confianza.
 
-Los contenedores no reciben credenciales de GitHub ni de despliegue. La publicación
-de PRs es una acción explícita del controlador; no realiza merge ni despliegue.
+Los contenedores no reciben credenciales de GitHub ni de despliegue. El controlador
+publica PRs y gestiona merges sujetos a autorización y CI; no despliega.
 Las rutas sensibles y cambios fuera de `.md`/`.css` no obtienen
 aprobación automática en la política inicial. Una allowlist de rutas no demuestra
 que un CSS carezca de efectos globales: se requiere revisión y evidencia visual.
@@ -260,8 +261,13 @@ Consulta [configuración y garantías de recuperación](docs/operations.md).
 `publish-pr` publica el commit verificado de una tarea como PR en borrador;
 `pr-status` consulta los checks del mismo SHA. La conexión inicial es
 `enigmz/software-factory`. La autenticación de GitHub CLI permanece en el
-controlador y el merge sigue siendo humano. Sin checks requeridos configurados,
-la integración informa `checks_passed: false`.
+controlador. `run` conecta la publicación con la fase de release;
+`release-step TASK_ID --config factory.local.json` la retoma sin llamadas a OpenAI.
+El merge automático exige `auto_merge: true`, rutas explícitas, riesgo bajo y
+reversible sin incertidumbre, cuatro revisiones y CI del SHA exacto. Los demás
+cambios requieren aprobación humana. Sin checks requeridos configurados,
+la integración informa `checks_passed: false`. La recuperación consulta GitHub
+antes de repetir efectos y registra `MERGED` una sola vez.
 Consulta [configuración, permisos y límites](docs/github.md).
 
 ## Validación
@@ -296,7 +302,7 @@ consultan en GitHub Actions; configurar CI no activa la protección de `main`.
 
 - Ejecución de previews dinámicas y recorridos UX con navegador.
 - Identidad y autorización remotas; almacén de evidencias externo e inmutable.
-- GitHub: protección de ramas y checks obligatorios; merge autorizado con SHA esperado. Adaptador GitLab pendiente.
+- GitHub: recepción de webhooks para despertar la fase de release. Adaptador GitLab pendiente.
 - Sentry: autenticación de webhooks, agrupación por incidencia y observación posdespliegue.
 - Proveedor de despliegue, ventanas de observación y reversión idempotente.
 - Recuperación dentro de conversaciones del agente y conciliación con la facturación del proveedor.
